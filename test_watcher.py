@@ -705,6 +705,36 @@ def test_send_telegram_alert_builds_city_names_date_and_button():
     assert "промокод" not in text.lower()
 
 
+def test_offset_resets_when_bot_token_changes():
+    """После смены бота (другой id в токене) offset должен сброситься, иначе
+    первые сообщения нового бота были бы молча выброшены getUpdates."""
+    conn = watcher.init_db(":memory:")
+    offsets = []
+
+    def fake_call(method, payload):
+        if method == "getUpdates":
+            offsets.append(payload["offset"])
+            if len(offsets) == 1:
+                return {"result": [{"update_id": 500, "message": {"chat": {"id": 1}, "text": "x"}}]}
+            return {"result": []}
+        return {"ok": True}
+
+    original_token = config.TELEGRAM_BOT_TOKEN
+    try:
+        config.TELEGRAM_BOT_TOKEN = "111:AAA"
+        with _Patch(_telegram_call=fake_call):
+            watcher.process_telegram_commands(conn)  # offset 1, запоминаем update_id 500
+            watcher.process_telegram_commands(conn)  # тот же бот — offset 501
+        assert offsets == [1, 501]
+
+        config.TELEGRAM_BOT_TOKEN = "222:BBB"  # другой бот
+        with _Patch(_telegram_call=fake_call):
+            watcher.process_telegram_commands(conn)
+        assert offsets[-1] == 1, "при смене бота offset должен сброситься на начало"
+    finally:
+        config.TELEGRAM_BOT_TOKEN = original_token
+
+
 def run_all():
     tests = [
         test_is_anomaly_boundary,
@@ -735,6 +765,7 @@ def run_all():
         test_ensure_alerts_reason_column_migrates_old_schema,
         test_city_name_and_date_formatting,
         test_send_telegram_alert_builds_city_names_date_and_button,
+        test_offset_resets_when_bot_token_changes,
     ]
     for test in tests:
         test()

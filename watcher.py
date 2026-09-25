@@ -743,10 +743,22 @@ def maybe_send_heartbeat(conn, num_routes):
     _set_bot_state(conn, "last_heartbeat_at", now.isoformat())
 
 
+def _reset_offset_if_bot_changed(conn):
+    """У каждого бота своя очередь update_id. После смены токена сохранённый
+    offset от старого бота больше любых id нового — getUpdates молча вернул бы
+    пусто и "подтвердил" (выкинул) первые сообщения нового бота. Запоминаем id
+    бота (число до двоеточия в токене) и при смене сбрасываем offset."""
+    bot_id = config.TELEGRAM_BOT_TOKEN.split(":", 1)[0]
+    if _get_bot_state(conn, "bot_id") != bot_id:
+        _set_bot_state(conn, "last_update_id", "0")
+        _set_bot_state(conn, "bot_id", bot_id)
+
+
 def process_telegram_commands(conn):
     """Короткий (не long-poll) опрос новых сообщений боту и их выполнение.
     Только сообщения из TELEGRAM_CHAT_ID исполняются — не тот, кому бот
     прислал бы алерт, не может им управлять."""
+    _reset_offset_if_bot_changed(conn)
     last_id = int(_get_bot_state(conn, "last_update_id", "0") or "0")
     try:
         result = _telegram_call("getUpdates", {"offset": last_id + 1, "timeout": 0})
