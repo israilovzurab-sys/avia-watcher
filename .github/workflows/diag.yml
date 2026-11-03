@@ -1,0 +1,33 @@
+name: diag
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: avia-watcher-diag
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: prices.db
+          key: prices-db-diag-${{ github.run_id }}
+          restore-keys: |
+            prices-db-
+      - run: |
+          python3 - <<'EOF'
+          import sqlite3
+          c = sqlite3.connect("file:prices.db?mode=ro", uri=True)
+          print("== alerts, price>=5000 or reason=anomaly ==")
+          for r in c.execute("SELECT created_at, reason, status, route_id, price, depart_date FROM alerts WHERE price>=5000 OR reason='anomaly' ORDER BY created_at DESC LIMIT 30"):
+              print(r)
+          print("== alerts total by reason/status ==")
+          for r in c.execute("SELECT reason, status, COUNT(*) FROM alerts GROUP BY 1,2"):
+              print(r)
+          print("== routes ==")
+          for r in c.execute("SELECT * FROM routes"):
+              print(r)
+          EOF
