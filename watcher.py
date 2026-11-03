@@ -298,7 +298,7 @@ def fetch_cheapest(route, token, rate_limited_until):
         "direct": "false",
         "sorting": "price",
         "unique": "false",
-        "limit": 5,
+        "limit": 30,
         "page": 1,
         "currency": route.get("currency", "rub"),
     }
@@ -358,6 +358,7 @@ def fetch_cheapest(route, token, rate_limited_until):
         return None
 
     seen_keys = None
+    offers = []
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -382,13 +383,19 @@ def fetch_cheapest(route, token, rate_limited_until):
         # проект сейчас работает в rub, см. config.CURRENCY).
         if route.get("currency", "rub") == "rub" and price_value < config.MIN_PLAUSIBLE_PRICE_RUB:
             continue
-        return {
+        offers.append({
             "price": price_value,
             "depart_date": item.get("depart_date") or item.get("departure_at"),
             "return_date": item.get("return_date") or item.get("return_at"),
             "link": item.get("link"),
             "actual": item.get("actual"),
-        }
+        })
+
+    if offers:
+        # Самый дешёвый — основной (аномалии/история); остальные нужны только
+        # для порога "до N рублей в Москву", чтобы не пропустить второй и третий
+        # дешёвый билет месяца.
+        return {**offers[0], "others": offers[1:]}
 
     log.error(
         "%s: непустой ответ Travelpayouts, но не распознано поле цены — "
@@ -899,6 +906,18 @@ def flush_pending_alerts(conn, route, rid):
             log.info("%s: алерт на цену %.0f доставлен в Telegram", rid, price)
 
 
+def _is_new_deal(conn, rid, offer):
+    """Тот же рейс уже присылали примерно за эту цену — не повторяем: цена одного
+    билета дрожит на рубли (4223 -> 4224 -> 4234), и каждый шаг был бы новым
+    алертом. Повтор только если стало дешевле больше чем на 5%."""
+    (prev_min,) = conn.execute(
+        "SELECT MIN(price) FROM alerts WHERE route_id=? AND depart_date=? "
+        "AND reason='price_ceiling' AND status IN ('pending', 'sent')",
+        (rid, offer.get("depart_date") or ""),
+    ).fetchone()
+    return prev_min is None or offer["price"] < prev_min * 0.95
+
+
 def check_route(conn, route, rate_limited_until):
     rid = route_id(route)
 
@@ -932,10 +951,15 @@ def check_route(conn, route, rate_limited_until):
         # порога шлётся всегда — не заменяет проверку выше, а дополняет её
         # (запрошено явно: "если 4200 — пусть всё равно пришлёт, даже если
         # это и есть медиана", но более дешёвые аномалии продолжают ловиться
-        # тем же общим механизмом дедупа/ретраев).
-        if (is_actual and route["destination"] == "MOW"
-                and entry["price"] <= config.MOSCOW_PRICE_CEILING_RUB):
-            claim_alert(conn, rid, route, entry, reason="price_ceiling")
+        # тем же общим механизмом дедупа/ретраев). Срок вылета не важен — билет
+        # "через 3 часа" за 3000₽ тоже должен прийти. Проверяются все билеты
+        # месяца из ответа, а не только самый дешёвый.
+        if route["destination"] == "MOW":
+            for offer in [entry, *entry.get("others", [])]:
+                if (offer.get("actual") is not False
+                        and offer["price"] <= config.MOSCOW_PRICE_CEILING_RUB
+                        and _is_new_deal(conn, rid, offer)):
+                    claim_alert(conn, rid, route, offer, reason="price_ceiling")
 
         if not near_term:
             record_price(conn, rid, entry)

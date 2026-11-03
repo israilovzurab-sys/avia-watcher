@@ -27,6 +27,39 @@ def make_entry(price, depart=None, ret=None, actual=None, link=None):
             "link": link, "actual": actual}
 
 
+def test_moscow_ceiling_covers_all_offers_any_departure_and_ignores_price_jitter():
+    conn = watcher.init_db(":memory:")
+    route = {"origin": "NAL", "destination": "MOW", "departure_at": "2026-11",
+             "return_at": None, "one_way": True, "currency": "rub"}
+    soon, later = _in_days(0.1), _in_days(20)  # вылет через ~2,5 часа и через 20 дней
+    sent = []
+
+    def fake_send(route, price, depart_date, return_date, purchase_url,
+                   is_itinerary_specific, reason="anomaly"):
+        sent.append((price, depart_date, reason))
+
+    def fetch_with(*prices_dates):
+        first, *rest = [make_entry(p, depart=d) for p, d in prices_dates]
+        return lambda route, token, rate_limited_until: {**first, "others": rest}
+
+    with _Patch(send_telegram_alert=fake_send, fetch_cheapest=fetch_with(
+            (3000, soon), (4800, later), (5100, _in_days(25)))):
+        watcher.check_route(conn, route, {})
+    assert sorted(p for p, _, _ in sent) == [3000, 4800], \
+        "горящий (через 3 часа) и не самый дешёвый билеты до потолка должны прийти, 5100 — нет"
+
+    sent.clear()
+    with _Patch(send_telegram_alert=fake_send, fetch_cheapest=fetch_with(
+            (3004, soon), (4790, later))):
+        watcher.check_route(conn, route, {})
+    assert sent == [], "тот же рейс, цена дрогнула на рубли — не повторяем"
+
+    with _Patch(send_telegram_alert=fake_send, fetch_cheapest=fetch_with(
+            (2500, soon))):
+        watcher.check_route(conn, route, {})
+    assert [p for p, _, _ in sent] == [2500], "заметно дешевле (больше 5%) — присылаем снова"
+
+
 def test_near_term_departure_is_ignored_by_anomaly_check():
     """Горящий билет (вылет завтра) за 15 000 при "медиане" 40 000 — не аномалия
     и не должен попадать в историю (реальный случай: ложные алерты 30-31 октября)."""
@@ -802,6 +835,7 @@ def run_all():
         test_send_telegram_alert_builds_city_names_date_and_button,
         test_offset_resets_when_bot_token_changes,
         test_near_term_departure_is_ignored_by_anomaly_check,
+        test_moscow_ceiling_covers_all_offers_any_departure_and_ignores_price_jitter,
     ]
     for test in tests:
         test()
