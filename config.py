@@ -39,7 +39,7 @@ CURRENCY = "rub"
 # едет вперёд само, а не застывает на месяце, когда маршрут был добавлен.
 # Через /add в Telegram можно добавить и маршрут с конкретной фиксированной
 # датой — тогда он проверяется только на неё, без скользящего окна.
-MONTHS_AHEAD = 3
+MONTHS_AHEAD = 2
 
 ROUTES = [
     {"origin": origin, "destination": destination, "currency": CURRENCY}
