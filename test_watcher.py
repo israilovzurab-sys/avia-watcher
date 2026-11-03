@@ -3,7 +3,7 @@
 Запуск: python test_watcher.py
 """
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import config
 import watcher
@@ -15,9 +15,44 @@ TEST_ROUTE = {
 }
 
 
-def make_entry(price, depart="2026-11-10", ret=None, actual=None, link=None):
-    return {"price": price, "depart_date": depart, "return_date": ret,
+def _in_days(n):
+    return (datetime.now(timezone.utc) + timedelta(days=n)).isoformat()
+
+
+_DEFAULT_DEPART = _in_days(30)  # одно значение на весь прогон — дедуп алертов идёт по дате
+
+
+def make_entry(price, depart=None, ret=None, actual=None, link=None):
+    return {"price": price, "depart_date": depart or _DEFAULT_DEPART, "return_date": ret,
             "link": link, "actual": actual}
+
+
+def test_near_term_departure_is_ignored_by_anomaly_check():
+    """Горящий билет (вылет завтра) за 15 000 при "медиане" 40 000 — не аномалия
+    и не должен попадать в историю (реальный случай: ложные алерты 30-31 октября)."""
+    conn = watcher.init_db(":memory:")
+    route = dict(TEST_ROUTE)
+    rid = watcher.route_id(route)
+    for _ in range(config.MIN_HISTORY_SAMPLES):
+        watcher.record_price(conn, rid, make_entry(40000))
+
+    sent = []
+
+    def fake_fetch(route, token, rate_limited_until):
+        return make_entry(15000, depart=_in_days(1))
+
+    def fake_send(route, price, depart_date, return_date, purchase_url,
+                   is_itinerary_specific, reason="anomaly"):
+        sent.append(price)
+
+    with _Patch(fetch_cheapest=fake_fetch, send_telegram_alert=fake_send):
+        watcher.check_route(conn, route, {})
+
+    assert sent == [], "вылет завтра — аномалию не ищем"
+    assert len(watcher.get_recent_prices(conn, rid, 100)) == config.MIN_HISTORY_SAMPLES, \
+        "горящая цена не должна попасть в историю"
+    assert watcher.is_near_term(_in_days(config.ANOMALY_MIN_DAYS_AHEAD + 1)) is False
+    assert watcher.is_near_term("не дата") is False
 
 
 def test_is_anomaly_boundary():
@@ -766,6 +801,7 @@ def run_all():
         test_city_name_and_date_formatting,
         test_send_telegram_alert_builds_city_names_date_and_button,
         test_offset_resets_when_bot_token_changes,
+        test_near_term_departure_is_ignored_by_anomaly_check,
     ]
     for test in tests:
         test()

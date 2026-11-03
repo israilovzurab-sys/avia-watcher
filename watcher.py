@@ -12,7 +12,7 @@ import sqlite3
 import statistics
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import requests
@@ -423,6 +423,16 @@ def record_price(conn, rid, entry):
         ),
     )
     conn.commit()
+
+
+def is_near_term(depart_date):
+    try:
+        dt = datetime.fromisoformat(depart_date)
+    except (TypeError, ValueError):
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt - datetime.now(timezone.utc) < timedelta(days=config.ANOMALY_MIN_DAYS_AHEAD)
 
 
 def is_anomaly(current_price, history, threshold):
@@ -907,9 +917,10 @@ def check_route(conn, route, rate_limited_until):
 
     if entry is not None:
         is_actual = entry.get("actual") is not False
+        near_term = is_near_term(entry.get("depart_date"))
         history = get_recent_prices(conn, rid, config.HISTORY_WINDOW)
 
-        if is_actual and len(history) >= config.MIN_HISTORY_SAMPLES:
+        if is_actual and not near_term and len(history) >= config.MIN_HISTORY_SAMPLES:
             anomaly, baseline = is_anomaly(entry["price"], history, config.ANOMALY_THRESHOLD)
             if anomaly:
                 log.warning("%s: АНОМАЛИЯ цена=%.0f медиана=%.0f", rid, entry["price"], baseline)
@@ -926,7 +937,8 @@ def check_route(conn, route, rate_limited_until):
                 and entry["price"] <= config.MOSCOW_PRICE_CEILING_RUB):
             claim_alert(conn, rid, route, entry, reason="price_ceiling")
 
-        record_price(conn, rid, entry)
+        if not near_term:
+            record_price(conn, rid, entry)
 
     flush_pending_alerts(conn, route, rid)
 
